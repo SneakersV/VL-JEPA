@@ -1,0 +1,15 @@
+torch
+torchvision
+transformers
+accelerate
+peft
+bitsandbytes
+huggingface_hub
+numpy
+pillow
+requests
+tqdm
+safetensors
+tokenizers
+sentencepiece
+protobuf
