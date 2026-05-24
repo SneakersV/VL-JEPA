@@ -108,7 +108,7 @@ def print_trainable_parameters(model):
 def build_qlora_model(
     vjepa_repo="facebook/vjepa2-vitl-fpc64-256",
     qencode_repo="Qwen/Qwen3-0.6B",
-    y_encoder_repo="google/embedding-gemma-300m",
+    y_encoder_repo="google/embeddinggemma-300m",
     max_query_len=512,
     shared_embed_dim=1536,
     r=16,
