@@ -114,7 +114,7 @@ class VLJepaModel(nn.Module):
         # Trả về mask vuông [B, 1, S, S] thay vì ma trận tam giác (causal mask)
         return extended_mask.expand(-1, -1, seq_len, -1)
 
-    def forward(self, pixel_values, queries_text, target_text=None):
+    def forward(self, pixel_values, queries_text=None, target_text=None):
         """
         Args:
             pixel_values: Vision input tensors.
@@ -122,12 +122,18 @@ class VLJepaModel(nn.Module):
             target_text: Textual target Y (e.g., the actual caption). Required during training.
         """
         device = pixel_values.device
+        batch_size = pixel_values.shape[0]
         
         # 1. Trích xuất đặc trưng Vision
         vision_embeds = self.encode_vision(pixel_values) # Shape: [B, N_vision, D]
         vision_len = vision_embeds.shape[1]
         
         # 2. Xử lý Text Queries (Padding & Truncation)
+        if queries_text is None:
+            queries_text = [""] * batch_size
+        elif isinstance(queries_text, str):
+            queries_text = [queries_text] * batch_size
+            
         tokens = self.tokenizer(
             queries_text, 
             padding=True, 
@@ -178,16 +184,20 @@ class VLJepaModel(nn.Module):
         valid_token_counts = mask.sum(dim=1).clamp(min=1e-9)
         
         predicted_target_embedding = sum_embeddings / valid_token_counts
+        predicted_target_embedding = self.predictor_head(predicted_target_embedding)
         
         if target_text is not None:
             return predicted_target_embedding
         
         # --- PATH 2: Y-ENCODER PIPELINE (Generates S_Y) ---
+        if isinstance(target_text, str):
+            target_text = [target_text] * batch_size
+            
         y_tokens = self.y_tokenizer(
             target_text, 
             padding=True, 
             truncation=True, 
-            max_length=self,
+            max_length=self.max_query_len,
             return_tensors="pt"
         ).to(device)
         
