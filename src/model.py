@@ -8,7 +8,7 @@ class VLJepaModel(nn.Module):
         self, 
         vjepa_repo="facebook/vjepa2-vitl-fpc64-256", 
         qencode_repo="Qwen/Qwen3-0.6B",
-        y_encoder_repo="google/embedding-gemma-300m",
+        y_encoder_repo="google/embeddinggemma-300m",
         max_query_len=512,
         shared_embed_dim=1536,
         quantization_config=None
@@ -186,7 +186,7 @@ class VLJepaModel(nn.Module):
         predicted_target_embedding = sum_embeddings / valid_token_counts
         predicted_target_embedding = self.predictor_head(predicted_target_embedding)
         
-        if target_text is not None:
+        if target_text is None:
             return predicted_target_embedding
         
         # --- PATH 2: Y-ENCODER PIPELINE (Generates S_Y) ---

@@ -1,3 +1,5 @@
+import argparse
+import json
 import math
 import os
 
@@ -7,6 +9,12 @@ from tqdm.auto import tqdm
 from transformers import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
 from losses import VLJepaLoss
+
+
+DEFAULT_DATASET_REPO = "Dangindev/viet-cultural-vqa"
+DEFAULT_VJEPA_REPO = "facebook/vjepa2-vitl-fpc64-256"
+DEFAULT_QENCODER_REPO = "Qwen/Qwen3-0.6B"
+DEFAULT_YENCODER_REPO = "google/embeddinggemma-300m"
 
 
 def build_pretrain_target(sample):
@@ -641,3 +649,257 @@ def run_training_pipeline(
         )
 
     return histories
+
+
+def _optional_int(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+    if value.lower() in {"", "none", "null"}:
+        return None
+
+    return int(value)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train or evaluate VL-JEPA on Vietnamese Cultural VQA."
+    )
+
+    parser.add_argument(
+        "--scenario",
+        default="smoke",
+        choices=["smoke", "pretrain", "sft", "two_stage", "one_step", "eval"],
+        help="Run scenario.",
+    )
+    parser.add_argument("--output-dir", default="checkpoints")
+    parser.add_argument("--device", default="auto")
+
+    parser.add_argument("--dataset-repo", default=DEFAULT_DATASET_REPO)
+    parser.add_argument("--vjepa-repo", default=DEFAULT_VJEPA_REPO)
+    parser.add_argument("--qencoder-repo", default=DEFAULT_QENCODER_REPO)
+    parser.add_argument("--yencoder-repo", default=DEFAULT_YENCODER_REPO)
+    parser.add_argument("--max-query-len", type=int, default=512)
+
+    parser.add_argument("--train-samples", type=_optional_int, default=20)
+    parser.add_argument("--val-samples", type=_optional_int, default=8)
+    parser.add_argument("--test-samples", type=_optional_int, default=8)
+    parser.add_argument("--image-size", type=int, default=256)
+
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--eval-batch-size", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--base-lr", type=float, default=5e-5)
+    parser.add_argument("--max-steps", type=_optional_int, default=None)
+    parser.add_argument("--eval-max-steps", type=_optional_int, default=None)
+
+    parser.add_argument(
+        "--eval-split",
+        default="validation",
+        choices=["validation", "test"],
+        help="Split used by --scenario eval.",
+    )
+    parser.add_argument(
+        "--eval-mode",
+        default="sft",
+        choices=["sft", "pretrain"],
+        help="Collator used by --scenario eval.",
+    )
+
+    return parser.parse_args()
+
+
+def _resolve_cli_device(device):
+    if device == "auto":
+        return get_default_device()
+
+    return torch.device(device)
+
+
+def _image_size_tuple(image_size):
+    if image_size is None:
+        return None
+
+    return (image_size, image_size)
+
+
+def build_cli_model(args):
+    from QLoRA_setup import build_qlora_model
+
+    return build_qlora_model(
+        vjepa_repo=args.vjepa_repo,
+        qencode_repo=args.qencoder_repo,
+        y_encoder_repo=args.yencoder_repo,
+        max_query_len=args.max_query_len,
+    )
+
+
+def build_cli_dataset(split, args, n_samples):
+    from dataset import build_viet_cultural_dataset
+
+    return build_viet_cultural_dataset(
+        split=split,
+        repo_id=args.dataset_repo,
+        n_samples=n_samples,
+        image_size=_image_size_tuple(args.image_size),
+        normalize=False,
+    )
+
+
+def _training_kwargs(args):
+    return {
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "eval_batch_size": args.eval_batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "base_lr": args.base_lr,
+        "device": _resolve_cli_device(args.device),
+        "max_steps": args.max_steps,
+        "eval_max_steps": args.eval_max_steps,
+    }
+
+
+def _print_result(name, result):
+    print(f"\n{name} result:")
+    print(json.dumps(result, indent=2, default=str))
+
+
+def _run_cli_training_scenario(args):
+    train_dataset = build_cli_dataset("train", args, args.train_samples)
+    val_dataset = build_cli_dataset("validation", args, args.val_samples)
+    model = build_cli_model(args)
+    common_kwargs = _training_kwargs(args)
+
+    if args.scenario == "pretrain":
+        result = train_pretrain_stage(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "pretrain"),
+            **common_kwargs,
+        )
+        _print_result("pretrain", result)
+        return
+
+    if args.scenario == "sft":
+        result = train_sft_stage(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "sft"),
+            **common_kwargs,
+        )
+        _print_result("sft", result)
+        return
+
+    if args.scenario == "one_step":
+        result = train_one_step_mixed(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "one_step"),
+            **common_kwargs,
+        )
+        _print_result("one_step", result)
+        return
+
+    if args.scenario == "two_stage":
+        pretrain_result = train_pretrain_stage(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "pretrain"),
+            **common_kwargs,
+        )
+        sft_result = train_sft_stage(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "sft"),
+            **common_kwargs,
+        )
+        _print_result("two_stage", {
+            "pretrain": pretrain_result,
+            "sft": sft_result,
+        })
+        return
+
+    raise ValueError(f"Unsupported training scenario: {args.scenario}")
+
+
+def run_cli(args):
+    if args.scenario == "smoke":
+        if args.max_steps is None:
+            args.max_steps = 1
+        if args.eval_max_steps is None:
+            args.eval_max_steps = 1
+
+        train_dataset = build_cli_dataset("train", args, args.train_samples)
+        val_dataset = build_cli_dataset("validation", args, args.val_samples)
+        model = build_cli_model(args)
+        common_kwargs = _training_kwargs(args)
+
+        pretrain_result = train_pretrain_stage(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "smoke", "pretrain"),
+            **common_kwargs,
+        )
+        sft_result = train_sft_stage(
+            model=model,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            output_dir=os.path.join(args.output_dir, "smoke", "sft"),
+            **common_kwargs,
+        )
+        _print_result("smoke", {
+            "pretrain": pretrain_result,
+            "sft": sft_result,
+        })
+        return
+
+    if args.scenario in {"pretrain", "sft", "two_stage", "one_step"}:
+        _run_cli_training_scenario(args)
+        return
+
+    if args.scenario == "eval":
+        eval_split = args.eval_split
+        n_samples = args.test_samples if eval_split == "test" else args.val_samples
+        eval_dataset = build_cli_dataset(eval_split, args, n_samples)
+        model = build_cli_model(args)
+        device = _resolve_cli_device(args.device)
+        model.to(device)
+
+        collate_fn = collate_pretrain if args.eval_mode == "pretrain" else collate_sft
+        dataloader = DataLoader(
+            eval_dataset,
+            batch_size=args.eval_batch_size or args.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+        criterion = VLJepaLoss().to(device)
+
+        result = evaluate(
+            model=model,
+            dataloader=dataloader,
+            criterion=criterion,
+            device=device,
+            stage_name=f"{eval_split}_{args.eval_mode}",
+            max_batches=args.eval_max_steps,
+        )
+        _print_result("eval", result)
+        return
+
+    raise ValueError(f"Unsupported scenario: {args.scenario}")
+
+
+def main():
+    args = parse_args()
+    run_cli(args)
+
+
+if __name__ == "__main__":
+    main()
