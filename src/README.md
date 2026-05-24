@@ -1,6 +1,6 @@
 # VL-JEPA Vietnamese Cultural VQA
 
-This repository trains a VL-JEPA-style vision-language embedding model on the Vietnamese Cultural VQA dataset. The project is notebook-friendly: there is no CLI entrypoint yet, so users import the dataset, model, training, evaluation, and inference helpers directly from Python.
+This repository trains a VL-JEPA-style vision-language embedding model on the Vietnamese Cultural VQA dataset. The project supports both notebook-style Python imports and a limited CLI for common training and evaluation scenarios.
 
 The current model learns an embedding space for image/query inputs and target text. It does not generate natural-language answers directly. For inference, use the predicted embedding for retrieval, ranking, or similarity against candidate answer embeddings.
 
@@ -134,6 +134,114 @@ train_sft_stage(
     eval_max_steps=1,
 )
 ```
+
+## CLI Usage
+
+You can run common scenarios directly from the project root:
+
+```bash
+python src/train.py --scenario smoke
+python src/train.py --scenario pretrain
+python src/train.py --scenario sft
+python src/train.py --scenario two_stage
+python src/train.py --scenario one_step
+python src/train.py --scenario eval --eval-split validation
+python src/train.py --scenario eval --eval-split test
+```
+
+All CLI flags are optional. If a flag is omitted, the default value is used.
+
+Common data and training flags:
+
+```bash
+python src/train.py \
+  --scenario two_stage \
+  --train-samples 100 \
+  --val-samples 20 \
+  --test-samples 20 \
+  --image-size 256 \
+  --batch-size 2 \
+  --eval-batch-size 2 \
+  --epochs 3 \
+  --grad-accum-steps 8 \
+  --base-lr 5e-5 \
+  --output-dir checkpoints \
+  --device auto
+```
+
+Model and repo flags:
+
+```bash
+python src/train.py \
+  --scenario smoke \
+  --dataset-repo Dangindev/viet-cultural-vqa \
+  --vjepa-repo facebook/vjepa2-vitl-fpc64-256 \
+  --qencoder-repo Qwen/Qwen3-0.6B \
+  --yencoder-repo google/embeddinggemma-300m \
+  --max-query-len 512
+```
+
+CLI defaults:
+
+- `--scenario smoke`
+- `--dataset-repo Dangindev/viet-cultural-vqa`
+- `--vjepa-repo facebook/vjepa2-vitl-fpc64-256`
+- `--qencoder-repo Qwen/Qwen3-0.6B`
+- `--yencoder-repo google/embeddinggemma-300m`
+- `--max-query-len 512`
+- `--train-samples 20`
+- `--val-samples 8`
+- `--test-samples 8`
+- `--image-size 256`
+- `--batch-size 1`
+- `--epochs 1`
+- `--grad-accum-steps 1`
+- `--base-lr 5e-5`
+- `--output-dir checkpoints`
+- `--device auto`
+
+## Bash Scripts
+
+The parent-level `scripts/` folder contains one runner per scenario:
+
+```bash
+bash scripts/run_smoke.sh
+bash scripts/run_pretrain.sh
+bash scripts/run_sft.sh
+bash scripts/run_two_stage.sh
+bash scripts/run_one_step.sh
+bash scripts/run_eval_validation.sh
+bash scripts/run_eval_test.sh
+bash scripts/run_all.sh
+```
+
+Each script uses defaults unless you override environment variables:
+
+```bash
+TRAIN_SAMPLES=100 BATCH_SIZE=2 EPOCHS=3 GRAD_ACCUM_STEPS=8 bash scripts/run_two_stage.sh
+```
+
+Supported script overrides:
+
+- `PYTHON`
+- `OUTPUT_DIR`
+- `DATASET_REPO`
+- `VJEPA_REPO`
+- `QENCODER_REPO`
+- `YENCODER_REPO`
+- `MAX_QUERY_LEN`
+- `TRAIN_SAMPLES`
+- `VAL_SAMPLES`
+- `TEST_SAMPLES`
+- `IMAGE_SIZE`
+- `BATCH_SIZE`
+- `EVAL_BATCH_SIZE`
+- `EPOCHS`
+- `GRAD_ACCUM_STEPS`
+- `BASE_LR`
+- `DEVICE`
+- `MAX_STEPS`
+- `EVAL_MAX_STEPS`
 
 ## Train: Two-Stage VL-JEPA Setup
 
