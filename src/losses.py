@@ -2,75 +2,74 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class InfoNCELoss(nn.Module):
-    def __init__(self, init_temperature=0.07, learnable_temperature=True):
-        """
-        InfoNCE (Information Noise-Contrastive Estimation) Loss.
-        Aligns the predicted embedding with the target embedding using in-batch negatives.
-        """
-        super().__init__()
-        if learnable_temperature:
-            # Initialize as a learnable parameter (standard practice in modern VLMs like CLIP)
-            self.temperature = nn.Parameter(torch.tensor([init_temperature]))
-        else:
-            self.register_buffer("temperature", torch.tensor([init_temperature]))
+class InfoNCE(torch.nn.Module):
+    def __init__(self, temperature=0.5):
+        super(InfoNCE, self).__init__()
+        self.temperature = temperature
 
-    def forward(self, predicted_embeds, target_embeds):
+    def forward(self, features):
         """
+        Computes the InfoNCE loss.
+        
         Args:
-            predicted_embeds: S_Y_hat from the Predictor, shape [Batch, Dim]
-            target_embeds: S_Y from the Y-Encoder, shape [Batch, Dim]
+            features (torch.Tensor): The feature matrix of shape [2 * batch_size, feature_dim], 
+                                     where features[:batch_size] are the representations of 
+                                     the first set of augmented images, and features[batch_size:] 
+                                     are the representations of the second set.
+        
+        Returns:
+            torch.Tensor: The computed InfoNCE loss.
         """
-        batch_size = predicted_embeds.shape[0]
+        # Normalize features to have unit norm
+        features = F.normalize(features, dim=1)
         
-        # 1. L2 Normalize the embeddings
-        # This projects the vectors onto a unit hypersphere, making dot products equivalent to cosine similarity
-        pred_norm = F.normalize(predicted_embeds, p=2, dim=1)
-        target_norm = F.normalize(target_embeds, p=2, dim=1)
-        
-        # Clamp temperature to prevent division by zero or numerical instability
-        temp = torch.clamp(self.temperature, min=1e-3, max=100.0)
-        
-        # 2. Compute similarity matrix (Logits)
-        # Shape: [Batch, Batch]
-        logits = torch.matmul(pred_norm, target_norm.T) / temp
-        
-        # 3. Create Targets
-        # The positive pairs are on the diagonal (0-to-0, 1-to-1, ..., B-to-B)
-        labels = torch.arange(batch_size, dtype=torch.long, device=predicted_embeds.device)
-        
-        # 4. Compute Symmetric Cross Entropy
-        # Predictor-to-Target Loss (Alignment of Prediction to Target)
-        loss_p2t = F.cross_entropy(logits, labels)
-        
-        # Target-to-Predictor Loss (Alignment of Target to Prediction)
-        loss_t2p = F.cross_entropy(logits.T, labels)
-        
-        # Symmetric average
-        return (loss_p2t + loss_t2p) / 2.0
+        # Compute similarity matrix
+        similarity_matrix = torch.matmul(features, features.T) / self.temperature
 
+        # Get batch size
+        batch_size = features.shape[0] // 2
+        
+        # Construct labels where each sample's positive pair is in the other view
+        labels = torch.arange(batch_size, device=features.device)
+        labels = torch.cat([labels + batch_size, labels], dim=0)
+
+        # Mask out self-similarities by setting the diagonal elements to -inf
+        mask = torch.eye(2 * batch_size, dtype=torch.bool, device=features.device)
+        similarity_matrix = similarity_matrix.masked_fill(mask, -float('inf'))
+        
+        # InfoNCE loss
+        loss = F.cross_entropy(similarity_matrix, labels)
+        
+        return loss
 
 class VLJepaLoss(nn.Module):
-    def __init__(self, init_temperature=0.07, l2_reg_weight=1e-4):
-        """
-        Combines InfoNCE (Alignment) with an L2 penalty (Regularization) 
-        as specified in the VL-JEPA architecture diagram.
-        """
+    def __init__(self, init_temperature=0.07, l2_reg_weight=1e-4, temperature=None):
         super().__init__()
-        self.alignment_loss = InfoNCELoss(init_temperature=init_temperature)
+        if temperature is None:
+            temperature = init_temperature
+
+        self.infonce = InfoNCE(temperature=temperature)
         self.l2_reg_weight = l2_reg_weight
 
-    def forward(self, predicted_embeds, target_embeds):
-        # 1. Alignment Loss (InfoNCE)
-        info_nce = self.alignment_loss(predicted_embeds, target_embeds)
-        
-        # 2. Regularization Loss
-        # Penalizes excessively large embedding magnitudes to stabilize the shared embedding space
-        reg_pred = torch.mean(predicted_embeds ** 2)
-        reg_target = torch.mean(target_embeds ** 2)
+    def forward(self, pred_emb, target_emb):
+        # pred_emb:   [B, D] from Predictor
+        # target_emb: [B, D] from Y-Encoder
+
+        # IMPORTANT:
+        # Do NOT detach target_emb if you want unfrozen Y-Encoder.
+        # target_emb = target_emb.detach()  # <-- do not do this
+
+        features = torch.cat([pred_emb, target_emb], dim=0)
+        info_nce = self.infonce(features)
+
+        reg_pred = torch.mean(pred_emb ** 2)
+        reg_target = torch.mean(target_emb ** 2)
         regularization = self.l2_reg_weight * (reg_pred + reg_target)
-        
-        # Total Loss
+
         total_loss = info_nce + regularization
-        
-        return total_loss, {"loss": total_loss, "info_nce": info_nce, "regularization": regularization}
+
+        return total_loss, {
+            "loss": total_loss,
+            "info_nce": info_nce,
+            "regularization": regularization,
+        }
