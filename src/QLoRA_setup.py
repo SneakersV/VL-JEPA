@@ -1,6 +1,6 @@
 import torch
 from transformers import BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 
 from model import VLJepaModel
 
@@ -151,6 +151,49 @@ def build_qlora_model(
     )
 
     model = get_peft_model(model, peft_config)
+
+    if freeze_y_encoder:
+        model = freeze_y_encoder_body(model)
+
+    print_trainable_parameters(model)
+
+    return model
+
+
+def build_qlora_model_from_adapter(
+    adapter_dir,
+    vjepa_repo="facebook/vjepa2-vitl-fpc64-256",
+    qencode_repo="Qwen/Qwen3-0.6B",
+    y_encoder_repo="google/embeddinggemma-300m",
+    max_query_len=512,
+    shared_embed_dim=1536,
+    freeze_y_encoder=True,
+):
+    """
+    Rebuild the quantized base model and load a saved PEFT adapter.
+
+    Use this when you saved stage 1 to disk and want to start stage 2 in a
+    fresh process, or after explicitly freeing GPU memory between stages.
+    """
+
+    bnb_config = build_bnb_config()
+
+    base_model = VLJepaModel(
+        vjepa_repo=vjepa_repo,
+        qencode_repo=qencode_repo,
+        y_encoder_repo=y_encoder_repo,
+        max_query_len=max_query_len,
+        shared_embed_dim=shared_embed_dim,
+        quantization_config=bnb_config,
+    )
+
+    base_model = prepare_model_for_kbit_training(base_model)
+
+    model = PeftModel.from_pretrained(
+        base_model,
+        adapter_dir,
+        is_trainable=True,
+    )
 
     if freeze_y_encoder:
         model = freeze_y_encoder_body(model)
