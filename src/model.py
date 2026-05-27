@@ -212,4 +212,3 @@ class VLJepaModel(nn.Module):
         target_embedding = self.y_encoder_head(pooled_target_embedding)
         
         return predicted_target_embedding, target_embedding
-
