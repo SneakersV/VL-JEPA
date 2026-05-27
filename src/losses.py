@@ -43,8 +43,9 @@ class InfoNCE(torch.nn.Module):
         return loss
 
 class VLJepaLoss(nn.Module):
-    def __init__(self, init_temperature=0.07, l2_reg_weight=1e-4, temperature=None):
+    def __init__(self, init_temperature=0.07, l2_reg_weight=0.0, temperature=None):
         super().__init__()
+
         if temperature is None:
             temperature = init_temperature
 
@@ -52,24 +53,45 @@ class VLJepaLoss(nn.Module):
         self.l2_reg_weight = l2_reg_weight
 
     def forward(self, pred_emb, target_emb):
-        # pred_emb:   [B, D] from Predictor
-        # target_emb: [B, D] from Y-Encoder
+        """
+        pred_emb:   [B, D] from Predictor
+        target_emb: [B, D] from Y-Encoder
+        """
 
-        # IMPORTANT:
-        # Do NOT detach target_emb if you want unfrozen Y-Encoder.
-        # target_emb = target_emb.detach()  # <-- do not do this
+        if pred_emb.dim() != 2 or target_emb.dim() != 2:
+            raise ValueError(
+                f"Expected pred_emb and target_emb to be 2D tensors [B, D], "
+                f"got {pred_emb.shape} and {target_emb.shape}"
+            )
 
+        if pred_emb.shape != target_emb.shape:
+            raise ValueError(
+                f"pred_emb and target_emb must have the same shape, "
+                f"got {pred_emb.shape} and {target_emb.shape}"
+            )
+
+        batch_size = pred_emb.shape[0]
+
+        if batch_size < 2:
+            raise ValueError("InfoNCE needs batch_size >= 2 to have negative samples.")
+
+        # [2B, D]
         features = torch.cat([pred_emb, target_emb], dim=0)
+
+        # SimCLR-style bidirectional InfoNCE
         info_nce = self.infonce(features)
 
-        reg_pred = torch.mean(pred_emb ** 2)
-        reg_target = torch.mean(target_emb ** 2)
-        regularization = self.l2_reg_weight * (reg_pred + reg_target)
+        if self.l2_reg_weight > 0:
+            reg_pred = torch.mean(pred_emb ** 2)
+            reg_target = torch.mean(target_emb ** 2)
+            regularization = self.l2_reg_weight * (reg_pred + reg_target)
+        else:
+            regularization = torch.zeros((), device=pred_emb.device, dtype=pred_emb.dtype)
 
         total_loss = info_nce + regularization
 
         return total_loss, {
-            "loss": total_loss,
-            "info_nce": info_nce,
-            "regularization": regularization,
+            "loss": total_loss.detach(),
+            "info_nce": info_nce.detach(),
+            "regularization": regularization.detach(),
         }
