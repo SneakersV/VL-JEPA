@@ -50,7 +50,9 @@ class VLJepaModel(nn.Module):
         # Cắt lấy 8 lớp Transformer cuối cùng của Qwen
         self.predictor_layers = nn.ModuleList(qwen_full.layers[-8:])
         self.predictor_norm = qwen_full.norm
-
+        self.qwen_rotary_emb = qwen_full.rotary_emb
+        self.qwen_config = qwen_full.config
+        
         # Linear projections
         vision_dim = self.vision_encoder.config.hidden_size
         qwen_dim = qwen_full.config.hidden_size
@@ -79,14 +81,29 @@ class VLJepaModel(nn.Module):
 
 
     def encode_vision(self, pixel_values):
-        """Xử lý luồng X-Encoder theo logic lặp frame của bạn"""
-        # Giả định pixel_values truyền vào là ảnh đơn có shape [B, C, H, W]
-        # Thêm chiều frame và lặp 16 lần: [B, C, 1, H, W] -> [B, C, 16, H, W]
+        """Convert image/video tensors to V-JEPA's video input layout."""
+        # V-JEPA2's HF forward expects [B, T, C, H, W] and permutes internally
+        # before its Conv3d patch embedding. For still images, repeat one frame.
         if len(pixel_values.shape) == 4:
-            pixel_values = pixel_values.unsqueeze(2).repeat(1, 1, 16, 1, 1)
-            
+            pixel_values = pixel_values.unsqueeze(1).repeat(1, 16, 1, 1, 1)
+        elif len(pixel_values.shape) == 5:
+            if pixel_values.shape[2] == 3:
+                pass
+            elif pixel_values.shape[1] == 3:
+                pixel_values = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
+            else:
+                raise ValueError(
+                    "Expected video pixel_values in [B, T, C, H, W] or "
+                    f"[B, C, T, H, W] format, got shape {tuple(pixel_values.shape)}."
+                )
+        else:
+            raise ValueError(
+                "Expected image pixel_values [B, C, H, W] or video pixel_values "
+                f"[B, T, C, H, W], got shape {tuple(pixel_values.shape)}."
+            )
+
         with torch.no_grad():
-            vision_outputs = self.vision_encoder(pixel_values)
+            vision_outputs = self.vision_encoder(pixel_values_videos=pixel_values)
             vision_features = vision_outputs.last_hidden_state 
             
         return self.vision_proj(vision_features)
@@ -160,15 +177,18 @@ class VLJepaModel(nn.Module):
         position_ids = torch.arange(
             0, seq_len, dtype=torch.long, device=hidden_states.device
         ).unsqueeze(0).expand(batch_size, -1)
+        
+        position_embeddings = self.qwen_rotary_emb(hidden_states, position_ids)
 
         # 5. Đưa qua 8 lớp Predictor (Llama layers)
         for layer in self.predictor_layers:
             layer_outputs = layer(
                 hidden_states, 
                 attention_mask=attention_mask,
-                position_ids=position_ids
+                position_ids=position_ids,
+                position_embeddings=position_embeddings
             )
-            hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
             
         hidden_states = self.predictor_norm(hidden_states)
         
