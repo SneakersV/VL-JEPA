@@ -72,26 +72,40 @@ class VLJepaLoss(nn.Module):
 
         batch_size = pred_emb.shape[0]
 
-        if batch_size < 2:
-            raise ValueError("InfoNCE needs batch_size >= 2 to have negative samples.")
+        if batch_size < 1:
+            raise ValueError("Expected at least one sample in the batch.")
 
-        # [2B, D]
-        features = torch.cat([pred_emb, target_emb], dim=0)
+        zero_loss = pred_emb.new_zeros(())
 
-        # SimCLR-style bidirectional InfoNCE
-        info_nce = self.infonce(features)
+        if batch_size >= 2:
+            # [2B, D]
+            features = torch.cat([pred_emb, target_emb], dim=0)
+
+            # SimCLR-style bidirectional InfoNCE
+            info_nce = self.infonce(features)
+            align_loss = zero_loss
+            main_loss = info_nce
+        else:
+            info_nce = zero_loss
+            align_loss = 1 - F.cosine_similarity(
+                pred_emb,
+                target_emb,
+                dim=1,
+            ).mean()
+            main_loss = align_loss
 
         if self.l2_reg_weight > 0:
             reg_pred = torch.mean(pred_emb ** 2)
             reg_target = torch.mean(target_emb ** 2)
             regularization = self.l2_reg_weight * (reg_pred + reg_target)
         else:
-            regularization = torch.zeros((), device=pred_emb.device, dtype=pred_emb.dtype)
+            regularization = zero_loss
 
-        total_loss = info_nce + regularization
+        total_loss = main_loss + regularization
 
         return total_loss, {
             "loss": total_loss.detach(),
             "info_nce": info_nce.detach(),
+            "align_loss": align_loss.detach(),
             "regularization": regularization.detach(),
         }
