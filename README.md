@@ -50,7 +50,7 @@ Target answer / explanation
   -> y_encoder_head
   -> S_Y
 
-Loss: InfoNCE(S_Y_hat, S_Y) + L2 regularization
+Loss: InfoNCE for multi-sample batches, cosine alignment for singleton batches, plus L2 regularization
 ```
 
 Important dimensions:
@@ -120,8 +120,9 @@ By default, the Y-encoder body is frozen for small-dataset stability, while `y_e
 
 Training uses `VLJepaLoss`, which combines:
 
-- symmetric InfoNCE contrastive loss,
-- in-batch negatives,
+- symmetric InfoNCE contrastive loss when the actual batch has at least two samples,
+- in-batch negatives for multi-sample batches,
+- cosine alignment fallback when the actual batch has one sample,
 - a learnable temperature by default,
 - L2 regularization on predicted and target embeddings.
 
@@ -132,6 +133,8 @@ predicted embedding i <-> target embedding i
 ```
 
 Other batch items become negatives.
+
+If the DataLoader produces a singleton batch, such as a one-sample dataset or a final leftover sample, the loss skips InfoNCE because there are no negatives and uses `1 - cosine_similarity(predicted, target)` instead. This keeps small smoke tests and low-VRAM runs trainable, though larger batches still provide a stronger contrastive signal.
 
 ## QLoRA Setup
 
@@ -245,6 +248,7 @@ Evaluation uses the same contrastive objective as training and reports:
 
 - `loss`
 - `info_nce`
+- `align_loss`
 - `regularization`
 - `batches`
 
@@ -271,10 +275,10 @@ Direct CLI examples:
 
 ```bash
 python src/train.py --scenario smoke
-python src/train.py --scenario two_stage --train-samples 100 --batch-size 2
+python src/train.py --scenario two_stage --train-samples 100 --batch-size 1
 ```
 
-All omitted CLI and script config values use defaults. For complete CLI, notebook, evaluation, and inference examples, see [src/README.md](src/README.md). For the concise training-stage summary, see [src/TRAINING_STRUCTURE.md](src/TRAINING_STRUCTURE.md).
+All omitted CLI and script config values use defaults. The default `batch_size` is `1` so scripts can run in low-VRAM or tiny-sample settings; use `BATCH_SIZE=2` or higher when possible for stronger InfoNCE negatives. For complete CLI, notebook, evaluation, and inference examples, see [src/README.md](src/README.md). For the concise training-stage summary, see [src/TRAINING_STRUCTURE.md](src/TRAINING_STRUCTURE.md).
 
 ## Repository Structure
 

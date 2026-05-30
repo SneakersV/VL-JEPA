@@ -10,7 +10,7 @@ The current model learns an embedding space for image/query inputs and target te
 - `QLoRA_setup.py`: QLoRA model builder, BitsAndBytes config, LoRA config, and trainable-parameter reporting.
 - `dataset.py`: Hugging Face dataset loading helpers and `VietCulturalDataset`.
 - `train.py`: collators, pixel preprocessing, training loops, evaluation, checkpointing, and all public training functions.
-- `losses.py`: InfoNCE and VL-JEPA loss.
+- `losses.py`: InfoNCE, singleton alignment fallback, and VL-JEPA loss.
 - `TRAINING_STRUCTURE.md`: concise training-stage structure.
 
 ## Environment Setup
@@ -160,8 +160,8 @@ python src/train.py \
   --val-samples 20 \
   --test-samples 20 \
   --image-size 256 \
-  --batch-size 2 \
-  --eval-batch-size 2 \
+  --batch-size 1 \
+  --eval-batch-size 1 \
   --epochs 3 \
   --grad-accum-steps 8 \
   --base-lr 5e-5 \
@@ -200,6 +200,8 @@ CLI defaults:
 - `--output-dir checkpoints`
 - `--device auto`
 
+Loss behavior depends on the actual batch produced by the DataLoader. Batches with two or more samples use InfoNCE with in-batch negatives. Singleton batches use cosine alignment and report it as `align_loss`, so `batch_size=1`, one-sample datasets, and final leftover batches can still train.
+
 ## Bash Scripts
 
 The parent-level `scripts/` folder contains one runner per scenario:
@@ -218,8 +220,10 @@ bash scripts/run_all.sh
 Each script uses defaults unless you override environment variables:
 
 ```bash
-TRAIN_SAMPLES=100 BATCH_SIZE=2 EPOCHS=3 GRAD_ACCUM_STEPS=8 bash scripts/run_two_stage.sh
+TRAIN_SAMPLES=100 BATCH_SIZE=1 EPOCHS=3 GRAD_ACCUM_STEPS=8 bash scripts/run_two_stage.sh
 ```
+
+`BATCH_SIZE=1` is the script default for low-VRAM and tiny-sample runs. Use `BATCH_SIZE=2` or higher when memory allows to enable true InfoNCE in-batch negatives on more batches.
 
 Supported script overrides:
 
@@ -266,7 +270,7 @@ pretrain_history = train_pretrain_stage(
     val_dataset=val_dataset,
     output_dir="checkpoints/pretrain",
     epochs=1,
-    batch_size=2,
+    batch_size=1,
     grad_accum_steps=8,
     base_lr=5e-5,
 )
@@ -277,7 +281,7 @@ sft_history = train_sft_stage(
     val_dataset=val_dataset,
     output_dir="checkpoints/sft",
     epochs=1,
-    batch_size=2,
+    batch_size=1,
     grad_accum_steps=8,
     base_lr=5e-5,
 )
@@ -298,13 +302,13 @@ histories = run_training_pipeline(
     pretrain_kwargs={
         "output_dir": "checkpoints/pretrain",
         "epochs": 1,
-        "batch_size": 2,
+        "batch_size": 1,
         "grad_accum_steps": 8,
     },
     sft_kwargs={
         "output_dir": "checkpoints/sft",
         "epochs": 1,
-        "batch_size": 2,
+        "batch_size": 1,
         "grad_accum_steps": 8,
     },
 )
@@ -323,7 +327,7 @@ baseline_history = train_one_step_mixed(
     val_dataset=val_dataset,
     output_dir="checkpoints/one_step",
     epochs=1,
-    batch_size=2,
+    batch_size=1,
     grad_accum_steps=8,
     base_lr=5e-5,
 )
@@ -364,7 +368,7 @@ model.to(device)
 
 test_loader = DataLoader(
     test_dataset,
-    batch_size=2,
+    batch_size=1,
     shuffle=False,
     collate_fn=collate_sft,
 )
@@ -385,7 +389,8 @@ print(metrics)
 Returned metrics:
 
 - `loss`: total VL-JEPA loss.
-- `info_nce`: symmetric contrastive alignment loss.
+- `info_nce`: symmetric contrastive alignment loss for multi-sample batches.
+- `align_loss`: singleton-batch cosine alignment loss.
 - `regularization`: L2 embedding regularization.
 - `batches`: number of evaluated batches.
 
@@ -466,6 +471,6 @@ If Hugging Face downloads fail, check network access and whether the dataset fil
 
 If BitsAndBytes fails, verify that your CUDA, PyTorch, and BitsAndBytes versions are compatible. QLoRA is intended for GPU use.
 
-If you run out of VRAM, lower `batch_size`, increase `grad_accum_steps`, reduce `n_samples` for testing, or use `max_steps=1` for a quick smoke run.
+If you run out of VRAM, keep `batch_size=1`, increase `grad_accum_steps`, reduce `n_samples` for testing, or use `max_steps=1` for a quick smoke run. If you have enough VRAM, increase `batch_size` to 2 or more for stronger InfoNCE training.
 
 If evaluation is slow, pass `eval_max_steps` during training or `max_batches` when calling `evaluate(...)`.
