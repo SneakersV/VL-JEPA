@@ -99,19 +99,41 @@ def prepare_pixel_values(pixel_values, model, device):
     """
     Convert image tensors to the expected V-JEPA input style.
 
-    VietCulturalDataset returns [B, C, H, W]. If values are 0-255, convert to
-    0-1, then apply processor mean/std normalization.
+    VietCulturalDataset returns [B, C, H, W]. Video tensors may be either
+    [B, T, C, H, W] or [B, C, T, H, W]. If values are 0-255, convert to 0-1,
+    then apply processor mean/std normalization on the channel dimension.
     """
     pixel_values = pixel_values.to(device, non_blocking=True).float()
 
     if pixel_values.max() > 2.0:
         pixel_values = pixel_values / 255.0
 
+    if pixel_values.ndim == 4:
+        channel_dim = 1
+    elif pixel_values.ndim == 5:
+        if pixel_values.shape[2] == 3:
+            channel_dim = 2
+        elif pixel_values.shape[1] == 3:
+            pixel_values = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
+            channel_dim = 2
+        else:
+            raise ValueError(
+                "Expected video pixel_values in [B, T, C, H, W] or "
+                f"[B, C, T, H, W] format, got shape {tuple(pixel_values.shape)}."
+            )
+    else:
+        raise ValueError(
+            "Expected image pixel_values [B, C, H, W] or video pixel_values "
+            f"[B, T, C, H, W], got shape {tuple(pixel_values.shape)}."
+        )
+
     image_mean = getattr(model.vision_processor, "image_mean", [0.485, 0.456, 0.406])
     image_std = getattr(model.vision_processor, "image_std", [0.229, 0.224, 0.225])
 
-    mean = torch.tensor(image_mean, device=device).view(1, 3, 1, 1)
-    std = torch.tensor(image_std, device=device).view(1, 3, 1, 1)
+    norm_shape = [1] * pixel_values.ndim
+    norm_shape[channel_dim] = 3
+    mean = torch.tensor(image_mean, device=device).view(*norm_shape)
+    std = torch.tensor(image_std, device=device).view(*norm_shape)
 
     return (pixel_values - mean) / std
 
@@ -226,6 +248,7 @@ def _train_batches(
     total_logs = {
         "loss": 0.0,
         "info_nce": 0.0,
+        "align_loss": 0.0,
         "regularization": 0.0,
     }
     total_steps = 0
@@ -307,6 +330,7 @@ def evaluate(
     total_logs = {
         "loss": 0.0,
         "info_nce": 0.0,
+        "align_loss": 0.0,
         "regularization": 0.0,
     }
     total_steps = 0
@@ -409,6 +433,7 @@ def _run_stage(
     max_steps=None,
     eval_max_steps=None,
     save_every_epoch=True,
+    logger=None,
 ):
     if device is None:
         device = get_default_device()
@@ -498,6 +523,10 @@ def _run_stage(
             "train": train_metrics,
         }
 
+        if logger is not None:
+            logger.log_metrics(stage_name, "train", train_metrics, global_step, epoch)
+            logger.log_cuda_memory(stage_name, "train", global_step, epoch)
+
         if val_loader is not None:
             val_metrics = evaluate(
                 model=model,
@@ -508,6 +537,10 @@ def _run_stage(
                 max_batches=eval_max_steps,
             )
             epoch_record["val"] = val_metrics
+
+            if logger is not None:
+                logger.log_metrics(stage_name, "val", val_metrics, global_step, epoch)
+                logger.log_cuda_memory(stage_name, "val", global_step, epoch)
 
             val_loss = val_metrics["loss"]
             if best_val_loss is None or val_loss < best_val_loss:
